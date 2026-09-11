@@ -1,86 +1,201 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
+
 Description: >
-  CloudVidya starter project — Frontend -> API Gateway -> Lambda -> DynamoDB.
-  One Lambda function (backend/app.py) routes every request itself, matching
-  the Day 2 "Backend walkthrough" session.
+  CampusFix — AI-powered campus infrastructure issue reporting and tracking.
+  Frontend -> API Gateway -> Lambda -> Groq AI / DynamoDB / S3.
+
+Parameters:
+
+  GroqSecretArn:
+    Type: String
+    Description: ARN of the AWS Secrets Manager secret containing the Groq API key.
+    NoEcho: true
+
 
 Globals:
+
   Function:
     Runtime: python3.12
-    Timeout: 10
-    MemorySize: 128
+    Timeout: 30
+    MemorySize: 256
+
     Environment:
       Variables:
         TABLE_NAME: !Ref ItemsTable
+        GROQ_SECRET_ARN: !Ref GroqSecretArn
+        EVIDENCE_BUCKET: !Ref EvidenceBucket
+
   Api:
     Cors:
       AllowMethods: "'GET,POST,PATCH,OPTIONS'"
-      AllowHeaders: "'Content-Type'"
+      AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
       AllowOrigin: "'*'"
 
+
 Resources:
-  # ---------------------------------------------------------------
-  # DynamoDB
-  # ---------------------------------------------------------------
+
+  # ==========================================
+  # DYNAMODB
+  # ==========================================
+
   ItemsTable:
     Type: AWS::DynamoDB::Table
+
     Properties:
       TableName: !Sub "${AWS::StackName}-items"
+
       BillingMode: PAY_PER_REQUEST
+
       AttributeDefinitions:
         - AttributeName: id
           AttributeType: S
+
       KeySchema:
         - AttributeName: id
           KeyType: HASH
 
-  # ---------------------------------------------------------------
-  # Lambda — one function, routes GET /health, POST /items, GET /items,
-  # PATCH /items/{id}. SAM auto-generates a least-privilege role, scoped
-  # to only this table.
-  # ---------------------------------------------------------------
+
+  # ==========================================
+  # S3 EVIDENCE BUCKET
+  # ==========================================
+
+  EvidenceBucket:
+    Type: AWS::S3::Bucket
+
+    Properties:
+
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+
+  # ==========================================
+  # CAMPUSFIX API LAMBDA
+  # ==========================================
+
   ApiFunction:
     Type: AWS::Serverless::Function
+
     Properties:
       Handler: app.handler
       CodeUri: backend/
+
       Policies:
+
+        # DynamoDB permissions
         - DynamoDBCrudPolicy:
             TableName: !Ref ItemsTable
+
+        # S3 permissions
+        - S3CrudPolicy:
+            BucketName: !Ref EvidenceBucket
+
+        # Groq API key from Secrets Manager
+        - Statement:
+            - Effect: Allow
+
+              Action:
+                - secretsmanager:GetSecretValue
+
+              Resource: !Ref GroqSecretArn
+
+
       Events:
+
+        # --------------------------------------
+        # HEALTH
+        # --------------------------------------
+
         HealthApi:
           Type: Api
+
           Properties:
             Path: /health
             Method: get
+
+
+        # --------------------------------------
+        # CREATE ISSUE
+        # --------------------------------------
+
         CreateItemApi:
           Type: Api
+
           Properties:
             Path: /items
             Method: post
+
+
+        # --------------------------------------
+        # LIST ISSUES
+        # --------------------------------------
+
         ListItemsApi:
           Type: Api
+
           Properties:
             Path: /items
             Method: get
+
+
+        # --------------------------------------
+        # UPDATE ISSUE STATUS
+        # --------------------------------------
+
         UpdateItemApi:
           Type: Api
+
           Properties:
             Path: /items/{id}
             Method: patch
 
-  # ---------------------------------------------------------------
-  # Frontend hosting note: this template does NOT create an Amplify app.
-  # Day 2's agenda connects this repo to Amplify Hosting through the AWS
-  # Console (Amplify > Host web app > pick this GitHub repo) so students
-  # see the Git-push-to-deploy flow directly — see docs/project-guide.md.
-  # ---------------------------------------------------------------
 
 Outputs:
+
+  # ==========================================
+  # API URL
+  # ==========================================
+
   ApiUrl:
-    Description: API Gateway base URL — paste this into frontend/config.js as API_BASE
-    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+    Description: CampusFix API Gateway base URL
+
+    Value: !Sub >
+      https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod
+
+
+  # ==========================================
+  # DYNAMODB TABLE
+  # ==========================================
+
   ItemsTableName:
-    Description: DynamoDB table name — open this in the console during the live demo
+    Description: CampusFix DynamoDB table name
+
     Value: !Ref ItemsTable
+
+
+  # ==========================================
+  # S3 BUCKET
+  # ==========================================
+
+  EvidenceBucketName:
+    Description: S3 bucket used for CampusFix evidence
+
+    Value: !Ref EvidenceBucket
+
+
+  # ==========================================
+  # GROQ SECRET
+  # ==========================================
+
+  GroqSecretArn:
+    Description: Secrets Manager secret used by CampusFix AI
+
+    Value: !Ref GroqSecretArn
