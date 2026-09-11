@@ -1,240 +1,51 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="theme-color" content="#0b1220" />
-  <title>CampusFix</title>
-  <link rel="stylesheet" href="styles.css" />
-</head>
+<button id="submitBtn" class="primary-btn">
+  <span>🚀</span> Report Issue
+</button>
 
-<body>
+<div id="status"></div>
 
-  <header class="topbar">
-    <div>
-      <div class="brand">
-        <span class="brand-icon">🛠</span>
-        <span id="appTitle">CampusFix</span>
+</div>
+
+<div class="card info-card">
+  <span class="section-label">HOW IT WORKS</span>
+  <h2>From problem to solution</h2>
+
+  <div class="steps">
+
+    <div class="step">
+      <div class="step-number">01</div>
+      <div>
+        <strong>Report</strong>
+        <p>Tell us what's wrong and where it is.</p>
       </div>
-      <p class="tagline">Report. Track. Improve your campus.</p>
     </div>
 
-    <div class="role-switch">
-      <button id="studentModeBtn" class="role-btn active">Student</button>
-      <button id="adminModeBtn" class="role-btn">Admin</button>
+    <div class="step">
+      <div class="step-number">02</div>
+      <div>
+        <strong>Prioritize</strong>
+        <p>CampusFix analyzes the issue and identifies urgency.</p>
+      </div>
     </div>
-  </header>
 
-  <main>
-
-    <!-- STUDENT VIEW -->
-    <section id="studentView">
-
-      <div class="hero">
-        <div>
-          <span class="eyebrow">CAMPUS INFRASTRUCTURE</span>
-          <h1>Make your campus<br><span>better, one report at a time.</span></h1>
-          <p>
-            Report broken equipment, maintenance problems and facility issues.
-            CampusFix helps your campus team track every issue to resolution.
-          </p>
-        </div>
+    <div class="step">
+      <div class="step-number">03</div>
+      <div>
+        <strong>Resolve</strong>
+        <p>Administrators track the issue through resolution.</p>
       </div>
+    </div>
 
-      <div class="grid">
+  </div>
 
-        <div class="card report-card">
-          <div class="card-heading">
-            <div>
-              <span class="section-label">NEW REPORT</span>
-              <h2>Report an issue</h2>
-            </div>
-            <span class="status-dot"></span>
-          </div>
+  <div class="architecture">
+    <span>Browser</span>
+    <b>→</b>
+    <span>API</span>
+    <b>→</b>
+    <span>Lambda</span>
+    <b>→</b>
+    <span>DynamoDB</span>
+  </div>
 
-          <label for="title">Issue title</label>
-          <input
-            id="title"
-            type="text"
-            placeholder="e.g. Projector not working"
-          />
-
-          <label for="category">Category</label>
-          <select id="category">
-            <option value="Equipment">Equipment</option>
-            <option value="Electrical">Electrical</option>
-            <option value="Plumbing">Plumbing</option>
-            <option value="Furniture">Furniture</option>
-            <option value="Internet">Internet</option>
-            <option value="Cleanliness">Cleanliness</option>
-            <option value="Safety">Safety</option>
-            <option value="Other">Other</option>
-          </select>
-
-          <label for="location">Location</label>
-          <input
-            id="location"
-            type="text"
-            placeholder="e.g. Lab 3, Ground Floor"
-          />
-
-          <label for="description">Describe the problem</label>
-          <textarea
-            id="description"
-            rows="5"
-            placeholder="Explain what happened and what needs to be fixed..."
-          ></textarea>
-
-          <label for="participantName">Your name</label>
-          <input
-            id="participantName"
-            type="text"
-            placeholder="e.g. Ahmed"
-          />
-
-         <button id="submitBtn" class="primary-btn">
-            <span>🚀</span> Report Issue
-          </button>
-<!-- 
-          <div id="status"></div>
-        </div>
-
-        <div class="card info-card">
-          <span class="section-label">HOW IT WORKS</span>
-          <h2>From problem to solution</h2>
-
-          <div class="steps">
-            <div class="step">
-              <div class="step-number">01</div>
-              <div>
-                <strong>Report</strong>
-                <p>Tell us what's wrong and where it is.</p>
-              </div>
-            </div>
-
-            <div class="step">
-              <div class="step-number">02</div>
-              <div>
-                <strong>Prioritize</strong>
-                <p>CampusFix analyzes the issue and identifies urgency.</p>
-              </div>
-            </div>
-
-            <div class="step">
-              <div class="step-number">03</div>
-              <div>
-                <strong>Resolve</strong>
-                <p>Administrators track the issue through resolution.</p>
-              </div>
-            </div>
-          </div>
-
-          <div class="architecture">
-            <span>Browser</span>
-            <b>→</b>
-            <span>API</span>
-            <b>→</b>
-            <span>Lambda</span>
-            <b>→</b>
-            <span>DynamoDB</span>
-          </div>
-        </div> --> 
-
-      </div>
-
-      <div class="card issues-card">
-        <div class="list-header">
-          <div> 
-            <span class="section-label">LIVE TRACKING</span>
-            <h2>Recent campus issues</h2>
-          </div>
-
-          <button id="refreshBtn" class="secondary-btn">↻ Refresh</button>
-        </div>
-
-        <div id="list">Loading...</div>
-      </div>
-
-    </section>
-
-    <!-- ADMIN VIEW -->
-    <section id="adminView" class="hidden">
-
-      <div class="admin-heading">
-        <div>
-          <span class="eyebrow">CAMPUSFIX ADMIN</span>
-          <h1>Infrastructure Command Center</h1>
-          <p>Monitor, prioritize and resolve campus infrastructure issues.</p>
-        </div>
-      </div>
-
-      <div class="stats-grid">
-        <div class="stat-card">
-          <span>Total Issues</span>
-          <strong id="totalCount">0</strong>
-        </div>
-
-        <div class="stat-card">
-          <span>Open</span>
-          <strong id="openCount">0</strong>
-        </div>
-
-        <div class="stat-card critical-stat">
-          <span>Critical</span>
-          <strong id="criticalCount">0</strong>
-        </div>
-
-        <div class="stat-card">
-          <span>Resolved</span>
-          <strong id="resolvedCount">0</strong>
-        </div>
-      </div>
-
-      <div class="card admin-card">
-
-        <div class="admin-toolbar">
-          <div>
-            <span class="section-label">ISSUE MANAGEMENT</span>
-            <h2>All reported issues</h2>
-          </div>
-
-          <div class="filters">
-            <select id="statusFilter">
-              <option value="">All Status</option>
-              <option value="OPEN">Open</option>
-              <option value="ACKNOWLEDGED">Acknowledged</option>
-              <option value="IN_PROGRESS">In Progress</option>
-              <option value="RESOLVED">Resolved</option>
-              <option value="CLOSED">Closed</option>
-            </select>
-
-            <select id="priorityFilter">
-              <option value="">All Priority</option>
-              <option value="CRITICAL">Critical</option>
-              <option value="HIGH">High</option>
-              <option value="MEDIUM">Medium</option>
-              <option value="LOW">Low</option>
-            </select>
-
-            <input id="searchInput" type="search" placeholder="Search issues..." />
-          </div>
-        </div>
-
-        <div id="adminList">Loading...</div>
-
-      </div>
-
-    </section>
-
-  </main>
-
-  <footer>
-    <strong>CampusFix</strong> · CloudVidya Hackathon Project
-    <span>Powered by AWS Serverless Architecture</span>
-  </footer>
-
-  <script src="config.js"></script>
-  <script src="app.js"></script>
-
-</body>
-</html>
+</div>
