@@ -7,9 +7,12 @@ Globals:
   Function:
     Timeout: 30
     Runtime: python3.12
-    Environment:
-      Variables:
-        TABLE_NAME: !Ref ItemsTable
+
+  Api:
+    Cors:
+      AllowOrigin: "'*'"
+      AllowHeaders: "'Content-Type'"
+      AllowMethods: "'GET,POST,PATCH,OPTIONS'"
 
 Resources:
 
@@ -18,9 +21,13 @@ Resources:
     Properties:
       CodeUri: backend/
       Handler: app.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ItemsTable
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref ItemsTable
+
       Events:
 
         Health:
