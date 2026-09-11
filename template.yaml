@@ -1,201 +1,69 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 
-Description: >
-  CampusFix — AI-powered campus infrastructure issue reporting and tracking.
-  Frontend -> API Gateway -> Lambda -> Groq AI / DynamoDB / S3.
-
-Parameters:
-
-  GroqSecretArn:
-    Type: String
-    Description: ARN of the AWS Secrets Manager secret containing the Groq API key.
-    NoEcho: true
-
+Description: CampusFix - Campus Infrastructure Reporting System
 
 Globals:
-
   Function:
-    Runtime: python3.12
     Timeout: 30
-    MemorySize: 256
-
+    Runtime: python3.12
     Environment:
       Variables:
         TABLE_NAME: !Ref ItemsTable
-        GROQ_SECRET_ARN: !Ref GroqSecretArn
-        EVIDENCE_BUCKET: !Ref EvidenceBucket
-
-  Api:
-    Cors:
-      AllowMethods: "'GET,POST,PATCH,OPTIONS'"
-      AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
-      AllowOrigin: "'*'"
-
 
 Resources:
 
-  # ==========================================
-  # DYNAMODB
-  # ==========================================
+  CampusFixFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: backend/
+      Handler: app.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ItemsTable
+      Events:
+
+        Health:
+          Type: Api
+          Properties:
+            Path: /health
+            Method: GET
+
+        CreateItem:
+          Type: Api
+          Properties:
+            Path: /items
+            Method: POST
+
+        ListItems:
+          Type: Api
+          Properties:
+            Path: /items
+            Method: GET
+
+        UpdateItem:
+          Type: Api
+          Properties:
+            Path: /items/{id}
+            Method: PATCH
 
   ItemsTable:
     Type: AWS::DynamoDB::Table
-
     Properties:
-      TableName: !Sub "${AWS::StackName}-items"
-
       BillingMode: PAY_PER_REQUEST
-
       AttributeDefinitions:
         - AttributeName: id
           AttributeType: S
-
       KeySchema:
         - AttributeName: id
           KeyType: HASH
 
-
-  # ==========================================
-  # S3 EVIDENCE BUCKET
-  # ==========================================
-
-  EvidenceBucket:
-    Type: AWS::S3::Bucket
-
-    Properties:
-
-      BucketEncryption:
-        ServerSideEncryptionConfiguration:
-          - ServerSideEncryptionByDefault:
-              SSEAlgorithm: AES256
-
-      PublicAccessBlockConfiguration:
-        BlockPublicAcls: true
-        BlockPublicPolicy: true
-        IgnorePublicAcls: true
-        RestrictPublicBuckets: true
-
-
-  # ==========================================
-  # CAMPUSFIX API LAMBDA
-  # ==========================================
-
-  ApiFunction:
-    Type: AWS::Serverless::Function
-
-    Properties:
-      Handler: app.handler
-      CodeUri: backend/
-
-      Policies:
-
-        # DynamoDB permissions
-        - DynamoDBCrudPolicy:
-            TableName: !Ref ItemsTable
-
-        # S3 permissions
-        - S3CrudPolicy:
-            BucketName: !Ref EvidenceBucket
-
-        # Groq API key from Secrets Manager
-        - Statement:
-            - Effect: Allow
-
-              Action:
-                - secretsmanager:GetSecretValue
-
-              Resource: !Ref GroqSecretArn
-
-
-      Events:
-
-        # --------------------------------------
-        # HEALTH
-        # --------------------------------------
-
-        HealthApi:
-          Type: Api
-
-          Properties:
-            Path: /health
-            Method: get
-
-
-        # --------------------------------------
-        # CREATE ISSUE
-        # --------------------------------------
-
-        CreateItemApi:
-          Type: Api
-
-          Properties:
-            Path: /items
-            Method: post
-
-
-        # --------------------------------------
-        # LIST ISSUES
-        # --------------------------------------
-
-        ListItemsApi:
-          Type: Api
-
-          Properties:
-            Path: /items
-            Method: get
-
-
-        # --------------------------------------
-        # UPDATE ISSUE STATUS
-        # --------------------------------------
-
-        UpdateItemApi:
-          Type: Api
-
-          Properties:
-            Path: /items/{id}
-            Method: patch
-
-
 Outputs:
 
-  # ==========================================
-  # API URL
-  # ==========================================
-
   ApiUrl:
-    Description: CampusFix API Gateway base URL
-
-    Value: !Sub >
-      https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod
-
-
-  # ==========================================
-  # DYNAMODB TABLE
-  # ==========================================
+    Description: CampusFix API URL
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
 
   ItemsTableName:
-    Description: CampusFix DynamoDB table name
-
+    Description: CampusFix DynamoDB Table
     Value: !Ref ItemsTable
-
-
-  # ==========================================
-  # S3 BUCKET
-  # ==========================================
-
-  EvidenceBucketName:
-    Description: S3 bucket used for CampusFix evidence
-
-    Value: !Ref EvidenceBucket
-
-
-  # ==========================================
-  # GROQ SECRET
-  # ==========================================
-
-  GroqSecretArn:
-    Description: Secrets Manager secret used by CampusFix AI
-
-    Value: !Ref GroqSecretArn

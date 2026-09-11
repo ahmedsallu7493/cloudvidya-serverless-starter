@@ -8,44 +8,30 @@ Routes:
   PATCH  /items/{id}
 
 Architecture:
-  Frontend -> API Gateway -> Lambda
-                         -> Groq AI
-                         -> DynamoDB
-                         -> Secrets Manager
+  Frontend -> API Gateway -> Lambda -> DynamoDB
 """
 
 import json
 import os
 import uuid
-import urllib.request
-import urllib.error
 from datetime import datetime, timezone
 
 import boto3
 
 
-# -------------------------------------------------------------------
-# AWS RESOURCES
-# -------------------------------------------------------------------
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
 
 TABLE_NAME = os.environ.get("TABLE_NAME")
-GROQ_SECRET_ARN = os.environ.get("GROQ_SECRET_ARN")
 
 dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(TABLE_NAME) if TABLE_NAME else None
 
-secrets_client = boto3.client("secretsmanager")
 
-# Cache the secret between warm Lambda invocations.
-_groq_api_key = None
-
-
-# -------------------------------------------------------------------
-# CONFIGURATION
-# -------------------------------------------------------------------
-
-GROQ_MODEL = "openai/gpt-oss-120b"
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+# ---------------------------------------------------------
+# CampusFix configuration
+# ---------------------------------------------------------
 
 VALID_STATUSES = {
     "OPEN",
@@ -55,18 +41,32 @@ VALID_STATUSES = {
     "CLOSED",
 }
 
+VALID_PRIORITIES = {
+    "LOW",
+    "MEDIUM",
+    "HIGH",
+    "CRITICAL",
+}
+
+
+# ---------------------------------------------------------
+# CORS
+# ---------------------------------------------------------
 
 CORS_HEADERS = {
     "Content-Type": "application/json",
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": (
+        "Content-Type,X-Amz-Date,Authorization,"
+        "X-Api-Key,X-Amz-Security-Token"
+    ),
     "Access-Control-Allow-Methods": "GET,POST,PATCH,OPTIONS",
 }
 
 
-# -------------------------------------------------------------------
-# COMMON RESPONSE
-# -------------------------------------------------------------------
+# ---------------------------------------------------------
+# Response helper
+# ---------------------------------------------------------
 
 def _response(status_code, body):
     return {
@@ -76,204 +76,9 @@ def _response(status_code, body):
     }
 
 
-# -------------------------------------------------------------------
-# SECRETS MANAGER
-# -------------------------------------------------------------------
-
-def _get_groq_api_key():
-    """
-    Retrieve the Groq API key from AWS Secrets Manager.
-
-    The secret should contain:
-
-    {
-        "GROQ_API_KEY": "your-key"
-    }
-
-    The key is cached for warm Lambda invocations.
-    """
-
-    global _groq_api_key
-
-    if _groq_api_key:
-        return _groq_api_key
-
-    if not GROQ_SECRET_ARN:
-        raise RuntimeError("GROQ_SECRET_ARN environment variable is missing.")
-
-    secret_response = secrets_client.get_secret_value(
-        SecretId=GROQ_SECRET_ARN
-    )
-
-    secret_string = secret_response.get("SecretString")
-
-    if not secret_string:
-        raise RuntimeError("Groq secret does not contain SecretString.")
-
-    secret_data = json.loads(secret_string)
-
-    api_key = secret_data.get("GROQ_API_KEY")
-
-    if not api_key:
-        raise RuntimeError("GROQ_API_KEY was not found inside the secret.")
-
-    _groq_api_key = api_key
-
-    return _groq_api_key
-
-
-# -------------------------------------------------------------------
-# GROQ AI ANALYSIS
-# -------------------------------------------------------------------
-
-def _analyze_issue_with_groq(title, description, location, category):
-    """
-    Ask Groq to convert an unstructured campus complaint
-    into structured maintenance intelligence.
-    """
-
-    api_key = _get_groq_api_key()
-
-    prompt = f"""
-You are the AI issue intelligence engine for CampusFix,
-a campus infrastructure reporting and maintenance platform.
-
-Analyze this campus issue.
-
-Title:
-{title}
-
-Description:
-{description}
-
-Location:
-{location or "Unknown"}
-
-Student-selected category:
-{category or "General"}
-
-Return ONLY valid JSON matching the required schema.
-
-Rules:
-- Do not invent a specific location if it was not provided.
-- Severity is 1 to 5.
-- Priority must be LOW, MEDIUM, HIGH, or CRITICAL.
-- Identify the most appropriate maintenance department.
-- Give a short professional summary.
-- Focus on campus infrastructure and maintenance.
-"""
-
-    schema = {
-        "type": "object",
-        "properties": {
-            "category": {
-                "type": "string",
-                "enum": [
-                    "Electrical",
-                    "Equipment",
-                    "Plumbing",
-                    "Furniture",
-                    "Internet",
-                    "Cleanliness",
-                    "Safety",
-                    "Other",
-                ],
-            },
-            "subcategory": {
-                "type": "string"
-            },
-            "severity": {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 5,
-            },
-            "priority": {
-                "type": "string",
-                "enum": [
-                    "LOW",
-                    "MEDIUM",
-                    "HIGH",
-                    "CRITICAL",
-                ],
-            },
-            "department": {
-                "type": "string",
-                "enum": [
-                    "Electrical",
-                    "IT",
-                    "Facilities",
-                    "Housekeeping",
-                    "Security",
-                    "Academic",
-                    "Other",
-                ],
-            },
-            "summary": {
-                "type": "string"
-            },
-        },
-        "required": [
-            "category",
-            "subcategory",
-            "severity",
-            "priority",
-            "department",
-            "summary",
-        ],
-        "additionalProperties": False,
-    }
-
-    request_body = {
-        "model": GROQ_MODEL,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a campus infrastructure "
-                    "issue classification system."
-                ),
-            },
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ],
-        "temperature": 0,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "campus_issue_analysis",
-                "schema": schema,
-                "strict": True,
-            },
-        },
-    }
-
-    request_data = json.dumps(request_body).encode("utf-8")
-
-    request = urllib.request.Request(
-        GROQ_API_URL,
-        data=request_data,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-    )
-
-    with urllib.request.urlopen(request, timeout=15) as response:
-        response_body = response.read().decode("utf-8")
-
-    result = json.loads(response_body)
-
-    content = result["choices"][0]["message"]["content"]
-
-    return json.loads(content)
-
-
-# -------------------------------------------------------------------
-# HEALTH
-# -------------------------------------------------------------------
+# ---------------------------------------------------------
+# Health
+# ---------------------------------------------------------
 
 def _health():
     return _response(
@@ -282,34 +87,31 @@ def _health():
             "status": "ok",
             "service": "CampusFix",
             "table": TABLE_NAME,
-            "ai": "Groq",
+            "ai": "disabled",
         },
     )
 
 
-# -------------------------------------------------------------------
-# CREATE ISSUE
-# -------------------------------------------------------------------
+# ---------------------------------------------------------
+# Create issue
+# ---------------------------------------------------------
 
 def _create_item(event):
-
     try:
         payload = json.loads(event.get("body") or "{}")
     except json.JSONDecodeError:
         return _response(
             400,
-            {"error": "Request body must be valid JSON."}
+            {"error": "Request body must be valid JSON."},
         )
 
     title = (payload.get("title") or "").strip()
     description = (payload.get("description") or "").strip()
-    category = (payload.get("category") or "General").strip()
+    category = (payload.get("category") or "Other").strip()
     participant_name = (
         payload.get("participantName") or ""
     ).strip()
-    location = (
-        payload.get("location") or ""
-    ).strip()
+    location = (payload.get("location") or "").strip()
 
     if not title or not description:
         return _response(
@@ -324,45 +126,14 @@ def _create_item(event):
 
     now = datetime.now(timezone.utc).isoformat()
 
-    # ---------------------------------------------------------------
-    # AI ANALYSIS
-    # ---------------------------------------------------------------
+    # -----------------------------------------------------
+    # Simple rule-based priority
+    # No LLM required
+    # -----------------------------------------------------
 
-    ai_processed = False
+    combined_text = f"{title} {description}".lower()
 
-    ai_data = {
-        "category": category,
-        "subcategory": "General",
-        "severity": 2,
-        "priority": "MEDIUM",
-        "department": "Facilities",
-        "summary": title,
-    }
-
-    try:
-        ai_data = _analyze_issue_with_groq(
-            title=title,
-            description=description,
-            location=location,
-            category=category,
-        )
-
-        ai_processed = True
-
-    except Exception as error:
-        # Do not lose the student's report if AI is temporarily
-        # unavailable.
-        print(f"Groq analysis failed: {str(error)}")
-
-    # ---------------------------------------------------------------
-    # SAFETY OVERRIDE
-    # ---------------------------------------------------------------
-
-    combined_text = (
-        f"{title} {description}"
-    ).lower()
-
-    emergency_terms = [
+    critical_terms = [
         "spark",
         "sparking",
         "smoke",
@@ -371,70 +142,86 @@ def _create_item(event):
         "exposed wire",
         "electric shock",
         "gas leak",
+        "dangerous",
+        "emergency",
     ]
 
-    if any(term in combined_text for term in emergency_terms):
-        ai_data["priority"] = "CRITICAL"
-        ai_data["severity"] = 5
+    high_terms = [
+        "broken",
+        "not working",
+        "leaking",
+        "leak",
+        "unsafe",
+        "damaged",
+        "crack",
+        "failed",
+    ]
 
-        if ai_data.get("department") == "Other":
-            ai_data["department"] = "Electrical"
+    if any(term in combined_text for term in critical_terms):
+        priority = "CRITICAL"
+        severity = 5
 
-    # ---------------------------------------------------------------
-    # SAVE TO DYNAMODB
-    # ---------------------------------------------------------------
+    elif any(term in combined_text for term in high_terms):
+        priority = "HIGH"
+        severity = 4
+
+    else:
+        priority = "MEDIUM"
+        severity = 2
+
+    # -----------------------------------------------------
+    # Department based on category
+    # -----------------------------------------------------
+
+    department_map = {
+        "Electrical": "Electrical",
+        "Equipment": "Facilities",
+        "Plumbing": "Facilities",
+        "Furniture": "Facilities",
+        "Internet": "IT",
+        "Cleanliness": "Housekeeping",
+        "Safety": "Security",
+        "Other": "Facilities",
+    }
+
+    department = department_map.get(
+        category,
+        "Facilities",
+    )
 
     item = {
         "id": str(uuid.uuid4()),
-
         "title": title,
         "description": description,
-
         "participantName": participant_name,
         "location": location,
-
-        "category": ai_data.get(
-            "category",
-            category,
-        ),
-
-        "subcategory": ai_data.get(
-            "subcategory",
-            "General",
-        ),
-
-        "severity": int(
-            ai_data.get("severity", 2)
-        ),
-
-        "priority": ai_data.get(
-            "priority",
-            "MEDIUM",
-        ),
-
-        "department": ai_data.get(
-            "department",
-            "Facilities",
-        ),
-
-        "aiSummary": ai_data.get(
-            "summary",
-            title,
-        ),
-
-        "aiProcessed": ai_processed,
-
+        "category": category,
+        "subcategory": "General",
+        "severity": severity,
+        "priority": priority,
+        "department": department,
+        "aiSummary": title,
+        "aiProcessed": False,
         "status": "OPEN",
-
         "createdAt": now,
         "updatedAt": now,
     }
 
-    table.put_item(Item=item)
+    try:
+        table.put_item(Item=item)
+
+    except Exception as error:
+        print(
+            f"Failed to create CampusFix issue: {str(error)}"
+        )
+
+        return _response(
+            500,
+            {"error": "Could not create issue."},
+        )
 
     print(
-        f"CampusFix issue created: "
-        f"{json.dumps(item)}"
+        f"CampusFix issue created: {json.dumps(item)}"
     )
 
     return _response(
@@ -446,103 +233,129 @@ def _create_item(event):
     )
 
 
-# -------------------------------------------------------------------
-# LIST / SEARCH / FILTER ISSUES
-# -------------------------------------------------------------------
+# ---------------------------------------------------------
+# List issues
+# ---------------------------------------------------------
 
 def _list_items(event):
+    try:
+        result = table.scan(Limit=100)
 
-    result = table.scan(Limit=100)
+        items = result.get("Items", [])
 
-    items = result.get("Items", [])
+        query_params = (
+            event.get("queryStringParameters") or {}
+        )
 
-    query_params = event.get("queryStringParameters") or {}
+        status_filter = (
+            query_params.get("status") or ""
+        ).upper().strip()
 
-    status_filter = (
-        query_params.get("status") or ""
-    ).upper()
+        priority_filter = (
+            query_params.get("priority") or ""
+        ).upper().strip()
 
-    priority_filter = (
-        query_params.get("priority") or ""
-    ).upper()
+        search_query = (
+            query_params.get("q") or ""
+        ).strip().lower()
 
-    search_query = (
-        query_params.get("q") or ""
-    ).strip().lower()
+        filtered_items = []
 
-    filtered_items = []
+        for item in items:
 
-    for item in items:
+            # Status filter
+            if status_filter:
+                if (
+                    item.get("status", "").upper()
+                    != status_filter
+                ):
+                    continue
 
-        if (
-            status_filter
-            and item.get("status", "").upper()
-            != status_filter
-        ):
-            continue
+            # Priority filter
+            if priority_filter:
+                if (
+                    item.get("priority", "").upper()
+                    != priority_filter
+                ):
+                    continue
 
-        if (
-            priority_filter
-            and item.get("priority", "").upper()
-            != priority_filter
-        ):
-            continue
+            # Search
+            if search_query:
 
-        if search_query:
+                searchable_text = " ".join(
+                    [
+                        str(item.get("title", "")),
+                        str(item.get("description", "")),
+                        str(item.get("category", "")),
+                        str(item.get("location", "")),
+                        str(item.get("department", "")),
+                        str(item.get("priority", "")),
+                        str(item.get("status", "")),
+                    ]
+                ).lower()
 
-            searchable_text = " ".join(
-                [
-                    str(item.get("title", "")),
-                    str(item.get("description", "")),
-                    str(item.get("category", "")),
-                    str(item.get("location", "")),
-                    str(item.get("department", "")),
-                ]
-            ).lower()
+                if search_query not in searchable_text:
+                    continue
 
-            if search_query not in searchable_text:
-                continue
+            filtered_items.append(item)
 
-        filtered_items.append(item)
+        # Newest issues first
+        filtered_items.sort(
+            key=lambda item: item.get(
+                "createdAt",
+                "",
+            ),
+            reverse=True,
+        )
 
-    filtered_items.sort(
-        key=lambda i: i.get("createdAt", ""),
-        reverse=True,
-    )
+        return _response(
+            200,
+            {
+                "items": filtered_items,
+                "count": len(filtered_items),
+            },
+        )
 
-    return _response(
-        200,
-        {
-            "items": filtered_items,
-            "count": len(filtered_items),
-        },
-    )
+    except Exception as error:
+
+        print(
+            f"Failed to list CampusFix issues: {str(error)}"
+        )
+
+        return _response(
+            500,
+            {"error": "Could not load issues."},
+        )
 
 
-# -------------------------------------------------------------------
-# UPDATE ISSUE STATUS
-# -------------------------------------------------------------------
+# ---------------------------------------------------------
+# Update issue status
+# ---------------------------------------------------------
 
 def _update_item_status(event):
 
-    path_parameters = event.get("pathParameters") or {}
+    path_parameters = (
+        event.get("pathParameters") or {}
+    )
 
     item_id = path_parameters.get("id")
 
     if not item_id:
         return _response(
             400,
-            {"error": "Issue ID is required."}
+            {"error": "Issue ID is required."},
         )
 
     try:
         payload = json.loads(
             event.get("body") or "{}"
         )
+
     except json.JSONDecodeError:
+
         return _response(
             400,
-            {"error": "Request body must be valid JSON."}
+            {"error": "Request body must be valid JSON."},
         )
 
     new_status = (
@@ -554,12 +367,15 @@ def _update_item_status(event):
     ).strip()
 
     if new_status not in VALID_STATUSES:
+
         return _response(
             400,
             {
                 "error": (
                     "Invalid status. Allowed values: "
-                    + ", ".join(sorted(VALID_STATUSES))
+                    + ", ".join(
+                        sorted(VALID_STATUSES)
+                    )
                 )
             },
         )
@@ -573,6 +389,7 @@ def _update_item_status(event):
     }
 
     if new_status == "RESOLVED":
+
         expression = (
             "SET #s = :status, "
             "updatedAt = :updatedAt, "
@@ -583,6 +400,7 @@ def _update_item_status(event):
         expression_values[":resolvedAt"] = now
 
     else:
+
         expression = (
             "SET #s = :status, "
             "updatedAt = :updatedAt, "
@@ -593,15 +411,11 @@ def _update_item_status(event):
 
         result = table.update_item(
             Key={"id": item_id},
-
             UpdateExpression=expression,
-
             ExpressionAttributeNames={
                 "#s": "status"
             },
-
             ExpressionAttributeValues=expression_values,
-
             ReturnValues="ALL_NEW",
         )
 
@@ -614,7 +428,7 @@ def _update_item_status(event):
 
         return _response(
             500,
-            {"error": "Could not update issue."}
+            {"error": "Could not update issue."},
         )
 
     return _response(
@@ -626,21 +440,14 @@ def _update_item_status(event):
     )
 
 
-# -------------------------------------------------------------------
-# MAIN LAMBDA HANDLER
-# -------------------------------------------------------------------
+# ---------------------------------------------------------
+# Lambda handler
+# ---------------------------------------------------------
 
 def handler(event, context):
 
-    method = event.get(
-        "httpMethod",
-        "",
-    )
-
-    resource = event.get(
-        "resource",
-        "",
-    )
+    method = event.get("httpMethod", "")
+    resource = event.get("resource", "")
 
     # CORS preflight
     if method == "OPTIONS":
@@ -653,21 +460,21 @@ def handler(event, context):
     ):
         return _health()
 
-    # Create
+    # Create issue
     if (
         resource == "/items"
         and method == "POST"
     ):
         return _create_item(event)
 
-    # List / search / filter
+    # List issues
     if (
         resource == "/items"
         and method == "GET"
     ):
         return _list_items(event)
 
-    # Update
+    # Update issue
     if (
         resource == "/items/{id}"
         and method == "PATCH"
@@ -678,8 +485,7 @@ def handler(event, context):
         404,
         {
             "error": (
-                f"No route for "
-                f"{method} {resource}"
+                f"No route for {method} {resource}"
             )
         },
     )
