@@ -1,178 +1,124 @@
-"""
-CampusFix backend
-
-Routes:
-  GET    /health
-  POST   /items
-  GET    /items
-  PATCH  /items/{id}
-
-Architecture:
-  Frontend -> API Gateway -> Lambda -> DynamoDB
-"""
-
 import json
 import os
+import re
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import boto3
+from boto3.dynamodb.conditions import Attr
 
 
-# ---------------------------------------------------------
+# ============================================================
 # Configuration
-# ---------------------------------------------------------
+# ============================================================
 
-TABLE_NAME = os.environ.get("TABLE_NAME")
+TABLE_NAME = os.environ.get("TABLE_NAME", "CampusFixItems")
 
 dynamodb = boto3.resource("dynamodb")
-table = dynamodb.Table(TABLE_NAME) if TABLE_NAME else None
+table = dynamodb.Table(TABLE_NAME)
 
 
-# ---------------------------------------------------------
-# CampusFix configuration
-# ---------------------------------------------------------
+# ============================================================
+# Common Helpers
+# ============================================================
 
-VALID_STATUSES = {
-    "OPEN",
-    "ACKNOWLEDGED",
-    "IN_PROGRESS",
-    "RESOLVED",
-    "CLOSED",
-}
-
-VALID_PRIORITIES = {
-    "LOW",
-    "MEDIUM",
-    "HIGH",
-    "CRITICAL",
-}
-
-
-# ---------------------------------------------------------
-# CORS
-# ---------------------------------------------------------
-
-CORS_HEADERS = {
-    "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": (
-        "Content-Type,X-Amz-Date,Authorization,"
-        "X-Api-Key,X-Amz-Security-Token"
-    ),
-    "Access-Control-Allow-Methods": "GET,POST,PATCH,OPTIONS",
-}
-
-
-# ---------------------------------------------------------
-# Response helper
-# ---------------------------------------------------------
-
-def _response(status_code, body):
+def response(status_code, body):
     return {
         "statusCode": status_code,
-        "headers": CORS_HEADERS,
+        "headers": {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET,POST,PATCH,OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type",
+            "Content-Type": "application/json",
+        },
         "body": json.dumps(body),
     }
 
 
-# ---------------------------------------------------------
-# Health
-# ---------------------------------------------------------
+def json_safe(value):
+    """
+    Convert DynamoDB Decimal values into normal Python numbers
+    so they can safely be returned as JSON.
+    """
+    if isinstance(value, Decimal):
+        return int(value) if value % 1 == 0 else float(value)
 
-def _health():
-    return _response(
-        200,
-        {
-            "status": "ok",
-            "service": "CampusFix",
-            "table": TABLE_NAME,
-            "ai": "disabled",
-        },
-    )
+    if isinstance(value, list):
+        return [json_safe(item) for item in value]
+
+    if isinstance(value, dict):
+        return {
+            key: json_safe(item)
+            for key, item in value.items()
+        }
+
+    return value
 
 
-# ---------------------------------------------------------
-# Create issue
-# ---------------------------------------------------------
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
 
-def _create_item(event):
+
+def get_body(event):
+    body = event.get("body")
+
+    if not body:
+        return {}
+
+    if isinstance(body, dict):
+        return body
+
     try:
-        payload = json.loads(event.get("body") or "{}")
-    except json.JSONDecodeError:
-        return _response(
-            400,
-            {"error": "Request body must be valid JSON."},
-        )
+        return json.loads(body)
+    except (json.JSONDecodeError, TypeError):
+        return {}
 
-    title = (payload.get("title") or "").strip()
-    description = (payload.get("description") or "").strip()
-    category = (payload.get("category") or "Other").strip()
-    participant_name = (
-        payload.get("participantName") or ""
-    ).strip()
-    location = (payload.get("location") or "").strip()
 
-    if not title or not description:
-        return _response(
-            400,
-            {
-                "error": (
-                    "Both 'title' and 'description' "
-                    "are required."
-                )
-            },
-        )
+# ============================================================
+# CampusFix Rule Engine
+# ============================================================
 
-    now = datetime.now(timezone.utc).isoformat()
+CRITICAL_KEYWORDS = [
+    "spark",
+    "sparking",
+    "smoke",
+    "burning",
+    "fire",
+    "exposed wire",
+    "electric shock",
+    "gas leak",
+    "dangerous",
+    "emergency",
+]
 
-    # -----------------------------------------------------
-    # Simple rule-based priority
-    # No LLM required
-    # -----------------------------------------------------
+HIGH_KEYWORDS = [
+    "broken",
+    "not working",
+    "leaking",
+    "leak",
+    "unsafe",
+    "damaged",
+    "crack",
+    "failed",
+]
 
-    combined_text = f"{title} {description}".lower()
 
-    critical_terms = [
-        "spark",
-        "sparking",
-        "smoke",
-        "burning",
-        "fire",
-        "exposed wire",
-        "electric shock",
-        "gas leak",
-        "dangerous",
-        "emergency",
-    ]
+def calculate_priority(title, description):
+    text = f"{title} {description}".lower()
 
-    high_terms = [
-        "broken",
-        "not working",
-        "leaking",
-        "leak",
-        "unsafe",
-        "damaged",
-        "crack",
-        "failed",
-    ]
+    for keyword in CRITICAL_KEYWORDS:
+        if keyword in text:
+            return "CRITICAL", 5
 
-    if any(term in combined_text for term in critical_terms):
-        priority = "CRITICAL"
-        severity = 5
+    for keyword in HIGH_KEYWORDS:
+        if keyword in text:
+            return "HIGH", 4
 
-    elif any(term in combined_text for term in high_terms):
-        priority = "HIGH"
-        severity = 4
+    return "MEDIUM", 2
 
-    else:
-        priority = "MEDIUM"
-        severity = 2
 
-    # -----------------------------------------------------
-    # Department based on category
-    # -----------------------------------------------------
-
+def determine_department(category):
     department_map = {
         "Electrical": "Electrical",
         "Equipment": "Facilities",
@@ -184,10 +130,71 @@ def _create_item(event):
         "Other": "Facilities",
     }
 
-    department = department_map.get(
-        category,
-        "Facilities",
+    return department_map.get(category, "Facilities")
+
+
+# ============================================================
+# Health
+# ============================================================
+
+def _health():
+    return response(
+        200,
+        {
+            "status": "ok",
+            "service": "CampusFix",
+            "table": TABLE_NAME,
+            "ai": "disabled",
+        },
     )
+
+
+# ============================================================
+# Create Issue
+# ============================================================
+
+def _create_item(event):
+    body = get_body(event)
+
+    title = str(body.get("title", "")).strip()
+    description = str(body.get("description", "")).strip()
+
+    if not title:
+        return response(
+            400,
+            {
+                "error": "Title is required."
+            },
+        )
+
+    if not description:
+        return response(
+            400,
+            {
+                "error": "Description is required."
+            },
+        )
+
+    category = str(
+        body.get("category", "Other")
+    ).strip() or "Other"
+
+    location = str(
+        body.get("location", "")
+    ).strip()
+
+    participant_name = str(
+        body.get("participantName", "")
+    ).strip()
+
+    priority, severity = calculate_priority(
+        title,
+        description
+    )
+
+    department = determine_department(category)
+
+    timestamp = now_iso()
 
     item = {
         "id": str(uuid.uuid4()),
@@ -196,296 +203,415 @@ def _create_item(event):
         "participantName": participant_name,
         "location": location,
         "category": category,
-        "subcategory": "General",
+        "subcategory": str(
+            body.get("subcategory", "General")
+        ).strip() or "General",
         "severity": severity,
         "priority": priority,
         "department": department,
         "aiSummary": title,
         "aiProcessed": False,
         "status": "OPEN",
-        "createdAt": now,
-        "updatedAt": now,
+        "createdAt": timestamp,
+        "updatedAt": timestamp,
     }
 
     try:
         table.put_item(Item=item)
 
-    except Exception as error:
         print(
-            f"Failed to create CampusFix issue: {str(error)}"
+            "CampusFix issue created:",
+            json.dumps(item)
         )
 
-        return _response(
+        return response(
+            201,
+            {
+                "message": "Issue created successfully.",
+                "item": item,
+            },
+        )
+
+    except Exception as exc:
+        print(
+            "Failed to create CampusFix issue:",
+            str(exc)
+        )
+
+        return response(
             500,
-            {"error": "Could not create issue."},
+            {
+                "error": "Could not create issue."
+            },
         )
 
-    print(
-        f"CampusFix issue created: {json.dumps(item)}"
-    )
 
-    return _response(
-        200,
-        {
-            "message": "Issue created successfully.",
-            "item": item,
-        },
-    )
-
-
-# ---------------------------------------------------------
-# List issues
-# ---------------------------------------------------------
+# ============================================================
+# List Issues
+# ============================================================
 
 def _list_items(event):
     try:
-        result = table.scan(Limit=100)
+        query_params = event.get("queryStringParameters") or {}
 
-        items = result.get("Items", [])
+        status_filter = str(
+            query_params.get("status", "")
+        ).strip().upper()
 
-        query_params = (
-            event.get("queryStringParameters") or {}
-        )
+        priority_filter = str(
+            query_params.get("priority", "")
+        ).strip().upper()
 
-        status_filter = (
-            query_params.get("status") or ""
-        ).upper().strip()
-
-        priority_filter = (
-            query_params.get("priority") or ""
-        ).upper().strip()
-
-        search_query = (
-            query_params.get("q") or ""
+        search_query = str(
+            query_params.get("q", "")
         ).strip().lower()
 
-        filtered_items = []
+        scan_kwargs = {
+            "Limit": 100
+        }
 
-        for item in items:
+        items = []
 
-            # Status filter
-            if status_filter:
-                if (
-                    item.get("status", "").upper()
-                    != status_filter
-                ):
-                    continue
+        while True:
+            result = table.scan(**scan_kwargs)
 
-            # Priority filter
-            if priority_filter:
-                if (
-                    item.get("priority", "").upper()
-                    != priority_filter
-                ):
-                    continue
+            items.extend(
+                result.get("Items", [])
+            )
 
-            # Search
-            if search_query:
+            last_key = result.get("LastEvaluatedKey")
 
+            if not last_key or len(items) >= 100:
+                break
+
+            scan_kwargs["ExclusiveStartKey"] = last_key
+
+        # ----------------------------------------------------
+        # Status filter
+        # ----------------------------------------------------
+
+        if status_filter:
+            items = [
+                item
+                for item in items
+                if str(
+                    item.get("status", "")
+                ).upper() == status_filter
+            ]
+
+        # ----------------------------------------------------
+        # Priority filter
+        # ----------------------------------------------------
+
+        if priority_filter:
+            items = [
+                item
+                for item in items
+                if str(
+                    item.get("priority", "")
+                ).upper() == priority_filter
+            ]
+
+        # ----------------------------------------------------
+        # Search
+        # ----------------------------------------------------
+
+        if search_query:
+            searchable_fields = [
+                "title",
+                "description",
+                "category",
+                "location",
+                "department",
+                "priority",
+                "status",
+            ]
+
+            filtered_items = []
+
+            for item in items:
                 searchable_text = " ".join(
-                    [
-                        str(item.get("title", "")),
-                        str(item.get("description", "")),
-                        str(item.get("category", "")),
-                        str(item.get("location", "")),
-                        str(item.get("department", "")),
-                        str(item.get("priority", "")),
-                        str(item.get("status", "")),
-                    ]
+                    str(item.get(field, ""))
+                    for field in searchable_fields
                 ).lower()
 
-                if search_query not in searchable_text:
-                    continue
+                if search_query in searchable_text:
+                    filtered_items.append(item)
 
-            filtered_items.append(item)
+            items = filtered_items
 
-        # Newest issues first
-        filtered_items.sort(
-            key=lambda item: item.get(
-                "createdAt",
-                "",
+        # ----------------------------------------------------
+        # Newest first
+        # ----------------------------------------------------
+
+        items.sort(
+            key=lambda item: str(
+                item.get("createdAt", "")
             ),
             reverse=True,
         )
 
-        return _response(
+        # ----------------------------------------------------
+        # IMPORTANT:
+        # DynamoDB numbers are Decimal objects.
+        # Convert them before json.dumps().
+        # ----------------------------------------------------
+
+        safe_items = json_safe(items)
+
+        return response(
             200,
             {
-                "items": filtered_items,
-                "count": len(filtered_items),
+                "items": safe_items,
+                "count": len(safe_items),
             },
         )
 
-    except Exception as error:
-
+    except Exception as exc:
         print(
-            f"Failed to list CampusFix issues: {str(error)}"
+            "Failed to list CampusFix issues:",
+            str(exc)
         )
 
-        return _response(
+        return response(
             500,
-            {"error": "Could not load issues."},
+            {
+                "error": "Could not load issues."
+            },
         )
 
 
-# ---------------------------------------------------------
-# Update issue status
-# ---------------------------------------------------------
+# ============================================================
+# Update Issue
+# ============================================================
 
-def _update_item_status(event):
+def _update_item_status(event, item_id):
+    body = get_body(event)
 
-    path_parameters = (
-        event.get("pathParameters") or {}
-    )
+    new_status = str(
+        body.get("status", "")
+    ).strip().upper()
 
-    item_id = path_parameters.get("id")
+    allowed_statuses = {
+        "OPEN",
+        "ACKNOWLEDGED",
+        "IN_PROGRESS",
+        "RESOLVED",
+        "CLOSED",
+    }
 
-    if not item_id:
-        return _response(
-            400,
-            {"error": "Issue ID is required."},
-        )
-
-    try:
-        payload = json.loads(
-            event.get("body") or "{}"
-        )
-
-    except json.JSONDecodeError:
-
-        return _response(
-            400,
-            {"error": "Request body must be valid JSON."},
-        )
-
-    new_status = (
-        payload.get("status") or ""
-    ).upper().strip()
-
-    admin_note = (
-        payload.get("adminNote") or ""
-    ).strip()
-
-    if new_status not in VALID_STATUSES:
-
-        return _response(
+    if new_status not in allowed_statuses:
+        return response(
             400,
             {
                 "error": (
                     "Invalid status. Allowed values: "
-                    + ", ".join(
-                        sorted(VALID_STATUSES)
-                    )
+                    "OPEN, ACKNOWLEDGED, IN_PROGRESS, "
+                    "RESOLVED, CLOSED."
                 )
             },
         )
 
-    now = datetime.now(timezone.utc).isoformat()
+    admin_note = str(
+        body.get("adminNote", "")
+    ).strip()
 
-    expression_values = {
-        ":status": new_status,
-        ":updatedAt": now,
-        ":adminNote": admin_note,
+    timestamp = now_iso()
+
+    update_expression = (
+        "SET #status = :status, "
+        "#updatedAt = :updatedAt"
+    )
+
+    expression_attribute_names = {
+        "#status": "status",
+        "#updatedAt": "updatedAt",
     }
 
+    expression_attribute_values = {
+        ":status": new_status,
+        ":updatedAt": timestamp,
+    }
+
+    if admin_note:
+        update_expression += ", #adminNote = :adminNote"
+
+        expression_attribute_names[
+            "#adminNote"
+        ] = "adminNote"
+
+        expression_attribute_values[
+            ":adminNote"
+        ] = admin_note
+
     if new_status == "RESOLVED":
+        update_expression += ", #resolvedAt = :resolvedAt"
 
-        expression = (
-            "SET #s = :status, "
-            "updatedAt = :updatedAt, "
-            "adminNote = :adminNote, "
-            "resolvedAt = :resolvedAt"
-        )
+        expression_attribute_names[
+            "#resolvedAt"
+        ] = "resolvedAt"
 
-        expression_values[":resolvedAt"] = now
-
-    else:
-
-        expression = (
-            "SET #s = :status, "
-            "updatedAt = :updatedAt, "
-            "adminNote = :adminNote"
-        )
+        expression_attribute_values[
+            ":resolvedAt"
+        ] = timestamp
 
     try:
-
         result = table.update_item(
-            Key={"id": item_id},
-            UpdateExpression=expression,
-            ExpressionAttributeNames={
-                "#s": "status"
+            Key={
+                "id": item_id
             },
-            ExpressionAttributeValues=expression_values,
+            UpdateExpression=update_expression,
+            ExpressionAttributeNames=expression_attribute_names,
+            ExpressionAttributeValues=expression_attribute_values,
             ReturnValues="ALL_NEW",
         )
 
-    except Exception as error:
+        updated_item = result.get(
+            "Attributes",
+            {}
+        )
 
+        return response(
+            200,
+            {
+                "message": "Issue updated successfully.",
+                "item": json_safe(updated_item),
+            },
+        )
+
+    except Exception as exc:
         print(
-            f"Failed to update issue "
-            f"{item_id}: {str(error)}"
+            "Failed to update CampusFix issue:",
+            str(exc)
         )
 
-        return _response(
+        return response(
             500,
-            {"error": "Could not update issue."},
+            {
+                "error": "Could not update issue."
+            },
         )
 
-    return _response(
-        200,
-        {
-            "message": "Issue updated successfully.",
-            "item": result.get("Attributes"),
-        },
-    )
 
-
-# ---------------------------------------------------------
-# Lambda handler
-# ---------------------------------------------------------
+# ============================================================
+# Lambda Handler
+# ============================================================
 
 def handler(event, context):
+    try:
+        http_method = event.get(
+            "httpMethod",
+            ""
+        ).upper()
 
-    method = event.get("httpMethod", "")
-    resource = event.get("resource", "")
+        resource = event.get(
+            "resource",
+            ""
+        )
 
-    # CORS preflight
-    if method == "OPTIONS":
-        return _response(200, {})
+        path = event.get(
+            "path",
+            ""
+        )
 
-    # Health
-    if (
-        resource == "/health"
-        and method == "GET"
-    ):
-        return _health()
+        # ----------------------------------------------------
+        # CORS preflight
+        # ----------------------------------------------------
 
-    # Create issue
-    if (
-        resource == "/items"
-        and method == "POST"
-    ):
-        return _create_item(event)
-
-    # List issues
-    if (
-        resource == "/items"
-        and method == "GET"
-    ):
-        return _list_items(event)
-
-    # Update issue
-    if (
-        resource == "/items/{id}"
-        and method == "PATCH"
-    ):
-        return _update_item_status(event)
-
-    return _response(
-        404,
-        {
-            "error": (
-                f"No route for {method} {resource}"
+        if http_method == "OPTIONS":
+            return response(
+                200,
+                {
+                    "message": "OK"
+                },
             )
-        },
-    )
+
+        # ----------------------------------------------------
+        # Health
+        # ----------------------------------------------------
+
+        if (
+            http_method == "GET"
+            and (
+                resource == "/health"
+                or path.endswith("/health")
+            )
+        ):
+            return _health()
+
+        # ----------------------------------------------------
+        # Create Issue
+        # ----------------------------------------------------
+
+        if (
+            http_method == "POST"
+            and (
+                resource == "/items"
+                or path.endswith("/items")
+            )
+        ):
+            return _create_item(event)
+
+        # ----------------------------------------------------
+        # List Issues
+        # ----------------------------------------------------
+
+        if (
+            http_method == "GET"
+            and (
+                resource == "/items"
+                or path.endswith("/items")
+            )
+        ):
+            return _list_items(event)
+
+        # ----------------------------------------------------
+        # Update Issue
+        # ----------------------------------------------------
+
+        if http_method == "PATCH":
+            path_parameters = (
+                event.get("pathParameters")
+                or {}
+            )
+
+            item_id = path_parameters.get("id")
+
+            if not item_id:
+                match = re.search(
+                    r"/items/([^/]+)",
+                    path
+                )
+
+                if match:
+                    item_id = match.group(1)
+
+            if item_id:
+                return _update_item_status(
+                    event,
+                    item_id
+                )
+
+        # ----------------------------------------------------
+        # Not Found
+        # ----------------------------------------------------
+
+        return response(
+            404,
+            {
+                "error": "Route not found."
+            },
+        )
+
+    except Exception as exc:
+        print(
+            "CampusFix Lambda error:",
+            str(exc)
+        )
+
+        return response(
+            500,
+            {
+                "error": "Internal server error."
+            },
+        )
